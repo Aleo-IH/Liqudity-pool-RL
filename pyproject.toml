@@ -1,0 +1,13 @@
+[project]
+name = "rl-group-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gymnasium>=1.2.2",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.6",
+    "ray[rllib]>=2.54.0",
+    "torch>=2.10.0",
+]
