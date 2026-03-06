@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tkinter GUI for watching trained poker models play (RLModule API).
 
 Usage
