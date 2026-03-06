@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tkinter GUI for watching trained poker models play.
+"""Tkinter GUI for watching trained poker models play (RLModule API).
 
 Usage
 -----
@@ -18,9 +18,10 @@ import numpy as np
 import ray
 import torch
 from ray.rllib.algorithms.ppo import PPO
-from ray.rllib.models import ModelCatalog
+from ray.rllib.core.columns import Columns
 
-from poker_env.model import ActionMaskModel
+# Ensure your custom RLModule is importable
+from poker_env.model import PokerActionMaskRLModule
 
 # ── Card constants (must match poker_env/evaluator.py) ────────────
 RANKS = "23456789TJQKA"
@@ -66,7 +67,7 @@ class PokerGUI:
         root.minsize(820, 580)
 
         self.algo = None
-        self.policy = None
+        self.rl_module = None
         self.env = None
         self.env_config: dict = {}
         self.obs_dict: dict = {}
@@ -89,7 +90,6 @@ class PokerGUI:
             )
 
         ray.init(ignore_reinit_error=True)
-        ModelCatalog.register_custom_model("action_mask_model", ActionMaskModel)
 
         self._build_ui()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -216,7 +216,7 @@ class PokerGUI:
                 self.algo.stop()
 
             self.algo = PPO.from_checkpoint(os.path.abspath(ckpt))
-            self.policy = self.algo.get_policy("shared_policy")
+            self.rl_module = self.algo.get_module("shared_policy")
 
             train_cfg = self.algo.config.env_config
             self.env_config = {
@@ -246,7 +246,7 @@ class PokerGUI:
     # ══════════════════════════════════════════════════════════════
 
     def new_hand(self):
-        if not self.policy:
+        if not self.rl_module:
             return
         from poker_env.env import PokerEnv
 
@@ -269,6 +269,7 @@ class PokerGUI:
             self.env = PokerEnv(self.env_config)
             self.hand_count += 1
             self.obs_dict, _ = self.env.reset(seed=self.hand_count)
+            
         self.hand_over = not bool(self.obs_dict)
         self.hand_rewards = {}
         self.action_probs = None
@@ -281,10 +282,11 @@ class PokerGUI:
             self._compute_probs()
             self.btn_step.configure(state=tk.NORMAL)
             self.btn_auto.configure(state=tk.NORMAL)
+            
         self._redraw()
 
     def step_action(self):
-        if self.hand_over or not self.obs_dict or not self.policy:
+        if self.hand_over or not self.obs_dict or not self.algo:
             return
 
         game = self.env._game
@@ -295,7 +297,12 @@ class PokerGUI:
         obs = self.obs_dict[agent]
 
         explore = not self.determ_var.get()
-        action, _, _ = self.policy.compute_single_action(obs, explore=explore)
+        # Compute action directly via the Algorithm
+        action = self.algo.compute_single_action(
+            obs, 
+            policy_id="shared_policy", 
+            explore=explore
+        )
         action = int(action)
         self.last_action = action
 
@@ -324,18 +331,24 @@ class PokerGUI:
         self._redraw()
 
     def _compute_probs(self):
-        if not self.obs_dict or not self.policy:
+        if not self.obs_dict or not self.rl_module:
             self.action_probs = self.value_est = None
             return
+            
         agent = next(iter(self.obs_dict))
         obs = self.obs_dict[agent]
+        
         with torch.no_grad():
             obs_t = {
-                k: torch.from_numpy(v).unsqueeze(0).float() for k, v in obs.items()
+                "observation": torch.from_numpy(obs["observation"]).unsqueeze(0).float(),
+                "action_mask": torch.from_numpy(obs["action_mask"]).unsqueeze(0).float(),
             }
-            logits, _ = self.policy.model({"obs": obs_t}, [], None)
+            batch = {Columns.OBS: obs_t}
+            outs = self.rl_module.forward_inference(batch)
+            logits = outs[Columns.ACTION_DIST_INPUTS]
+            
             self.action_probs = torch.softmax(logits, dim=-1).squeeze(0).numpy()
-            self.value_est = self.policy.model.value_function().item()
+            self.value_est = outs[Columns.VF_PREDS].item()
 
     def toggle_auto(self):
         if self.hand_over:

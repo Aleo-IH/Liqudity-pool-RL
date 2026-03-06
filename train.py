@@ -23,6 +23,7 @@ from ray.rllib.policy.policy import PolicySpec
 
 from poker_env.env import PokerEnv
 from poker_env.model import ActionMaskModel
+from ray.rllib.core.rl_module.rl_module import RLModuleSpec
 
 
 def main() -> None:
@@ -68,8 +69,8 @@ def main() -> None:
     config = (
         PPOConfig()
         .api_stack(
-            enable_rl_module_and_learner=False,
-            enable_env_runner_and_connector_v2=False,
+            enable_rl_module_and_learner=True,        # ENABLED
+            enable_env_runner_and_connector_v2=True,  # ENABLED
         )
         .environment(env=PokerEnv, env_config=env_config)
         .framework("torch")
@@ -81,20 +82,21 @@ def main() -> None:
             clip_param=args.clip_param,
             entropy_coeff=args.entropy_coeff,
             vf_loss_coeff=args.vf_loss_coeff,
-            train_batch_size=args.train_batch_size,
+            train_batch_size_per_learner=args.train_batch_size, # RENAMED
             minibatch_size=args.minibatch_size,
             num_epochs=args.num_epochs,
-            model={
-                "custom_model": "action_mask_model",
-                "custom_model_config": {"hidden": args.hidden},
-            },
+        )
+        .rl_module(
+            rl_module_spec=RLModuleSpec(
+                module_class=PokerActionMaskRLModule,
+                model_config_dict={"hidden": args.hidden}, # Use model_config_dict
+            )
         )
         .multi_agent(
-            policies={"shared_policy": PolicySpec()},
+            policies={"shared_policy"},
             policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy",
         )
     )
-    config._disable_preprocessor_api = True
 
     algo = config.build()
 

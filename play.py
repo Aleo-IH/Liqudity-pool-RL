@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Visualise poker games using a trained RLlib model.
+"""Visualise poker games using a trained RLlib model (RLModule API).
 
 Loads a saved RLlib checkpoint and plays test hands, rendering each
 decision with the agent's action probabilities.
@@ -22,11 +21,12 @@ import ray
 import torch
 
 from ray.rllib.algorithms.ppo import PPO
-from ray.rllib.models import ModelCatalog
+from ray.rllib.core.columns import Columns
 
 from poker_env.env import PokerEnv
 from poker_env.game import NUM_ACTIONS, Action
-from poker_env.model import ActionMaskModel
+# Ensure your custom RLModule is importable so RLlib can find it when restoring
+from poker_env.model import PokerActionMaskRLModule
 
 ACTION_NAMES = {
     Action.FOLD: "Fold",
@@ -38,15 +38,21 @@ ACTION_NAMES = {
 }
 
 
-def print_action_probs(policy, obs: dict, chosen_action: int) -> None:
-    """Display the policy's probability over each legal action."""
+def print_action_probs(rl_module, obs: dict, chosen_action: int) -> None:
+    """Display the RLModule's probability over each legal action."""
     with torch.no_grad():
+        # Create a batched Dict observation directly
         obs_t = {
-            k: torch.from_numpy(v).unsqueeze(0).float() for k, v in obs.items()
+            "observation": torch.from_numpy(obs["observation"]).unsqueeze(0).float(),
+            "action_mask": torch.from_numpy(obs["action_mask"]).unsqueeze(0).float(),
         }
-        logits, _ = policy.model({"obs": obs_t}, [], None)
+        batch = {Columns.OBS: obs_t}
+        
+        # Run inference
+        outs = rl_module.forward_inference(batch)
+        logits = outs[Columns.ACTION_DIST_INPUTS]
         probs = torch.softmax(logits, dim=-1).squeeze(0).numpy()
-        value = policy.model.value_function().item()
+        value = outs[Columns.VF_PREDS].item()
 
     mask = obs["action_mask"]
     parts = []
@@ -59,14 +65,15 @@ def print_action_probs(policy, obs: dict, chosen_action: int) -> None:
 
 
 def play_hands(
-    policy,
+    algo,
+    rl_module,
     env_config: dict,
     num_hands: int,
     deterministic: bool = False,
     random_seats: set[int] | None = None,
     cash_game: bool = False,
 ) -> None:
-    """Play and render hands using the trained policy."""
+    """Play and render hands using the trained algorithm."""
     env = PokerEnv(env_config)
     rng = np.random.default_rng(42)
     num_players = env_config["num_players"]
@@ -94,19 +101,22 @@ def play_hands(
                     action = int(rng.choice(legal))
                     print(f"  {agent} (random): {ACTION_NAMES[Action(action)]}")
                 else:
-                    action, _, _ = policy.compute_single_action(
-                        obs, explore=not deterministic
+                    # New API: compute single action directly from the algorithm
+                    action = algo.compute_single_action(
+                        obs,
+                        policy_id="shared_policy",
+                        explore=not deterministic
                     )
                     action = int(action)
                     print(f"  {agent}:")
-                    print_action_probs(policy, obs, action)
+                    print_action_probs(rl_module, obs, action)
 
                 obs_dict, rewards, terminateds, truncateds, infos = env.step(
                     {agent: action}
                 )
                 if rewards:
-                    for agent in rewards:
-                        total_rewards[agent] += rewards[agent]
+                    for a in rewards:
+                        total_rewards[a] += rewards[a]
                     hands_done += 1
                     print(f"\n  --- Hand {hand_idx} Results ---")
                     for a in sorted(rewards):
@@ -138,12 +148,14 @@ def play_hands(
                     action = int(rng.choice(legal))
                     print(f"  {agent} (random): {ACTION_NAMES[Action(action)]}")
                 else:
-                    action, _, _ = policy.compute_single_action(
-                        obs, explore=not deterministic
+                    action = algo.compute_single_action(
+                        obs,
+                        policy_id="shared_policy",
+                        explore=not deterministic
                     )
                     action = int(action)
                     print(f"  {agent}:")
-                    print_action_probs(policy, obs, action)
+                    print_action_probs(rl_module, obs, action)
 
                 obs_dict, rewards, terminateds, truncateds, infos = env.step(
                     {agent: action}
@@ -195,7 +207,6 @@ def main() -> None:
     args = parser.parse_args()
 
     ray.init(ignore_reinit_error=True)
-    ModelCatalog.register_custom_model("action_mask_model", ActionMaskModel)
 
     algo = PPO.from_checkpoint(os.path.abspath(args.checkpoint))
     print(f"Loaded checkpoint: {args.checkpoint}")
@@ -211,11 +222,13 @@ def main() -> None:
         env_config["cash_game"] = True
         env_config["max_hands_per_episode"] = args.hands
 
-    policy = algo.get_policy("shared_policy")
+    # Extract the module for probability visualization
+    rl_module = algo.get_module("shared_policy")
     random_seats = set(args.vs_random) if args.vs_random else None
 
     play_hands(
-        policy,
+        algo,
+        rl_module,
         env_config,
         args.hands,
         args.deterministic,
